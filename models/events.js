@@ -108,7 +108,7 @@ var config = require('../config')
     }
 
   ,	saveVote = exports.saveVote = function(event, vote, from) {
-      // The _id of our vote document will be a composite of our event_id and the
+      // The _id of the vote document will be a composite of our event_id and the
       // person's phone number. This will guarantee one vote per event 
       var voteDoc = {  
         _id: 'vote:' + event._id + ':' + from,
@@ -139,7 +139,7 @@ var config = require('../config')
             // loop through the response to detect votes that were rejected as duplicates
             for (var i in votesToSave) {
               if (body[i].error) {
-                // send the person an SMS to alert them that you can only vote once
+                // send an SMS to alert that you can only vote once
                 console.log('Notifying of duplicate vote: ', votesToSave[i])
                 client.sendSms({To: votesToSave[i].phonenumber, From: votesToSave[i].event_phonenumber, Body: 'Sorry, you are only allowed to vote once.'});
               }
