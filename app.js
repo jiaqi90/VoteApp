@@ -1,7 +1,3 @@
-/**
- * Module dependencies.
- */
-
 var express = require('express')
   , http = require('http')
   , path = require('path')
@@ -18,6 +14,7 @@ app.configure(function(){
   app.set('view engine', 'hjs');
   app.use(express.favicon());
   app.use(express.logger('dev'));
+  app.use(express.urlencoded());
   app.use(express.bodyParser());
   app.use(express.methodOverride());
   app.use(express.cookieParser(config.cookiesecret));
@@ -67,3 +64,6 @@ app.get('/admin/', function(req, res) {
 
 app.post  ('/api/sessions',   routes.login);
 app.delete('/api/sessions',   routes.logout);
+app.get   ('/api/events',     routes.getEventList);
+app.get   ('/api/events/:id', routes.getEventById);
+app.delete('/api/events/:id', routes.destroyEvent);
