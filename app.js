@@ -5,7 +5,8 @@
 var express = require('express')
   , http = require('http')
   , path = require('path')
-  , socketio = require('socket.io');
+  , socketio = require('socket.io')
+  , config = require('./config');
 
 var app = express()
   , server = http.createServer(app)
@@ -19,6 +20,7 @@ app.configure(function(){
   app.use(express.logger('dev'));
   app.use(express.bodyParser());
   app.use(express.methodOverride());
+  app.use(express.cookieParser(config.cookiesecret));
   app.use(app.router);
   app.use(express.static(path.join(__dirname, 'public')));
 });
@@ -47,4 +49,21 @@ io.sockets.on('connection', function(socket) {
     });
 });
 
-require('./routes')(app, io);
+var routes = require('./routes')(io);
+
+app.get ('/events/:shortname',    routes.getEvent);
+app.post('/vote/sms',             routes.voteSMS);
+app.post('/vote/voice',           routes.voteVoice);
+app.post('/vote/voice/selection', routes.voiceSelection);
+
+app.get('/admin/', function(req, res) {
+  if(process.env.NODE_ENV === 'production' && req.headers['x-forwarded-proto'] !== 'https') {
+    return res.redirect('https://' + req.get('Host') + req.url);
+  }
+  else {
+    routes.admin(req, res);
+  }
+});
+
+app.post  ('/api/sessions',   routes.login);
+app.delete('/api/sessions',   routes.logout);

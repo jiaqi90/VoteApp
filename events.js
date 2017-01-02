@@ -6,72 +6,132 @@ saveVote – saves a persons vote
 
 var config = require('./config')
   , utils = require('./utils')
-  , cradle = require('cradle')
-  , connection = new(cradle.Connection)(config.couchdb.url, config.couchdb.port, {
-        auth:{username: config.couchdb.username, password: config.couchdb.password},
-        cache: true})
-  , events = connection.database('events')
+  , _und = require('underscore')
+  , db = require('nano')(config.couchdb.url)
+  , client = require('twilio')(config.twilio.sid, config.twilio.key)
+  
+  // Local caches for event and voting information (will be periodically flushed)    
+  , eventsCache = {}
+  , secondsToInvalidateEvents = config.couchdb.secondsToInvalidateEvents
 
-  // query events based on either shortname or phonenumber (both unique keys)
+  , votesCache = {}
+  , secondsToFlushVotes = config.couchdb.secondsToFlushVotes
 
-  , findBy = exports.findBy = function(attr, val, callback, retries) {
-  	  var retries = (typeof retries !== 'undefined') ? retries : 0;
-  	  
-  	  events.view('event/by'+utils.initcap(attr), {key: val}, function (err, res) { 
-  	      if (err) {
-  	          if (retries < 3) {
-  	              console.log('Failed to load event, retrying:  ' + attr + ', ' + val);
-  	              findBy(attr, val, callback, retries+1);
-  	          }
-  	          else
-  	              var msg = 'Failed to load event, DONE retrying: ' + attr + ', ' + val;
-  	              console.log(msg);
-  	              callback(msg, null);
-  	      }
-  	      else {
-  	          if (res.length != 1) {
-  	            var msg = 'No matching event: ' + attr + ', ' + val;
-  	              console.log(msg);
-  	              callback(msg, null);
-  	          }
-  	          else {
-  	              var event = res[0].value;  
-  	              callback(null, event);                    
-  	          }
-  	      }          
-  	  }); 
+  // Look up the phone number, get the document's ID, then lookup the full document (including votes)
+  , findByPhonenumber = exports.findByPhonenumber = function(phonenumber, callback) {
+
+      findBy('byPhonenumber', {key: phonenumber}, function(err, event) {
+          if (err) {
+            callback(err, null);
+          }
+          else {
+              findBy('all', {key: [event._id], reduce: false}, callback);
+          }
+      });
   }
 
-  // check to see if this user has voted for this event
+  , findBy = exports.findBy = function(view, params, callback) {
 
-  ,	hasVoted = exports.hasVoted = function(event, number) {
-    	var retval = false;
-      event.voteoptions.forEach(function(vo){
-        if (vo.numbers.indexOf(number) >= 0) {
-          retval = true;
-       	}
-    	});
-    	return retval;
-	}
+      var event;
 
-  // persist the vote to the DB
-
-  ,	saveVote = exports.saveVote = function(event, vote, from, callback) {
-  		var index = vote - 1;
-
-  		event.voteoptions[index].votes++;
-  		event.voteoptions[index].numbers.push(from);
-
-  		events.save(event._id, event, function(err, res) {
-  		    if (err) {
-            var msg = 'Failed to save vote for event id = ' + event._id + '. ' + JSON.stringify(err);
-  		      console.log(msg);               
-  		      callback(msg, null);
+      if (event = eventsCache[view+JSON.stringify(params)]) {
+        callback(null, event);
+      }
+      else {
+        
+        db.view('event', view, params, function(err, body) {
+          if (err) {
+            console.log(err);
+            callback(err, null);
           }
-  		    else {
-  		      callback(null, event.voteoptions[index]);
-  		    }
+          else {
+            if (body.rows.length == 0) {
+              var msg = 'No match for: ' + view + ', ' + params;
+              console.log(msg);
+              callback(msg, null);              
+            }
+            else {
+              event = body.rows[0].value;
+              eventsCache[view+JSON.stringify(params)] = event;
+              callback(null, event);
+            }
+          }
+        });
+      }
+  }
 
-  		});    	
+  , voteCounts = exports.voteCounts = function(event, callback) {
+      db.view('event', 'all', {startkey: [event._id], endkey: [event._id, {}, {}], group_level: 2}, function(err, body) {
+        if (err) {
+          callback(err);
+        }
+        else {
+          // populate count for voteoptions
+          event.voteoptions.forEach(function(vo, i){ 
+            var found = _und.find(body.rows, function(x) {return x.key[1] == vo.id});
+            vo['votes'] = (found? found.value : 0);
+          });
+          callback();
+        }
+      });
+  }
 
-  	};
+  , saveVote = exports.saveVote = function(event, vote, from) {
+
+      // The _id of our vote document will be a composite of our event_id and the
+      // person's phone number. This will guarantee one vote per event 
+      var voteDoc = {  
+        _id: 'vote:' + event._id + ':' + from,
+        type: 'vote',
+        event_id: event._id,
+        event_phonenumber: event.phonenumber,
+        vote: vote,
+        phonenumber: from
+      };
+
+      votesCache[voteDoc._id] = voteDoc;
+    }
+
+  , flushVotes = function() {
+      
+      var votesToSave = _und.values(votesCache);
+      votesCache = {};
+
+      if (votesToSave.length > 0) {
+        db.bulk({docs: votesToSave}, function(err, body) {
+          if (err) {
+            console.log("Failed to save votes, popping them back on the cache");
+            votesToSave.forEach(function(v) {
+              votesCache[v._id] = v;
+            });
+          }
+          else {
+            // loop through the response to detect votes that were rejected as duplicates
+            for (var i in votesToSave) {
+              if (body[i].error) {
+                // send the person an SMS to alert them that you can only vote once
+                console.log('Notifying of duplicate vote: ', votesToSave[i])
+                client.sendSms({To: votesToSave[i].phonenumber, From: votesToSave[i].event_phonenumber, Body: 'Sorry, you are only allowed to vote once.'});
+              }
+              else {
+                io.sockets.in(votesToSave[i].event_id).emit('vote', votesToSave[i].vote);
+                client.sendSms({To: votesToSave[i].phonenumber, From: votesToSave[i].event_phonenumber, Body: 'Thanks for your vote! // powered by http://twil.io'});
+              }
+            }
+          }
+        });
+      }
+  }
+
+  , invalidateEvents = function() {
+      eventsCache = {};
+  }
+
+  , invalidateEventsJob = setInterval(invalidateEvents, 1000*secondsToInvalidateEvents)
+  , flushVotesJob = setInterval(flushVotes, 1000*secondsToFlushVotes)
+  , io;
+
+module.exports = function(socketio) {
+  io = socketio;
+  return exports;
+};
